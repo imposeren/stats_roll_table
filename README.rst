@@ -7,6 +7,7 @@ This code generates data for tables that can be used to generate "random" attrib
 
 Original idea from reddit: https://www.reddit.com/r/dndnext/comments/54ext0/rolling_for_point_buy/
 
+
 What have been changed
 ======================
 
@@ -34,3 +35,12 @@ Alternative method that is not implemented yet:
 1. roll Xd100
 2. calculate the sum
 3. use tables where low probability stats are specified for single value on dices, and high probability stats are specified for range of dice values
+
+
+Notes for developers
+====================
+
+Using not yet released module for dice probability calculations so it must be
+installed manually::
+
+	pip install -r ./requirements.pip

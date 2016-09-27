@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
+"""Generator for pseudo-random d20 attributes generation that honors probability and pointbuy cost.
+
+
+"""
 
 from __future__ import division
 
 from collections import OrderedDict
 import csv
-import json
 import logging
-import sys
 
 from fastcache import lru_cache
 
@@ -50,6 +52,20 @@ PRECALCED_2D10K1_PROBS = {
     10: 0.19,
 }
 
+PRECALCED_4D10K1_PROBS = {
+    1: 0.00010,
+    2: 0.00150,
+    3: 0.00650,
+    4: 0.01750,
+    5: 0.03690,
+    6: 0.06710,
+    7: 0.11050,
+    8: 0.16950,
+    9: 0.24650,
+    10: 0.34390,
+}
+
+
 DEFAULT_POINTBUY_TABLE = {}
 
 for v in range(8, 14):
@@ -80,7 +96,7 @@ if use_debug:
     logger.addHandler(handler)
 
 
-def lengths_to_coords(lengths_list, normalize=True):
+def lengths_to_coords(lengths_list, normalize=False):
     """convert list of ranges to list of (start, stop) tuples representing 1d coordinates ."""
     coords_list = []
     current_coord = 0
@@ -116,6 +132,10 @@ def get_dice_description(spec):
         description = '{}d{}'.format(num_dices, dice_size)
     elif spec == (1, 40):
         description = '(1d2-1)*20 + 1d20'
+    elif spec == (1, 80):
+        description = '(1d4-1)*20 + 1d20'
+    elif spec == (1, 120):
+        description = '(1d6-1)*20 + 1d20'
     else:
         raise ValueError('unknown dice spec `%s`' % (spec,))
     return description
@@ -137,6 +157,37 @@ def jsonize_tuple_keys(some_dict):
     return tmp_dict
 
 
+DICE_SIZES = (1, 2, 4, 6, 8, 10, 12, 20, 100)
+"""Sequence of allowed dice sizes."""
+
+
+DEFAULT_TABLE_DICES = (
+    (1, 100),
+    (2, 20),
+    (4, 8),
+    (2, 12),
+    (1, 20),
+    (3, 6),
+    (2, 8),
+    (1, 12),
+    (1, 10),
+    (1, 8),
+    (1, 6),
+    (1, 4),
+    (1, 2),
+    (1, 1),
+)
+"""list of default "dice configurations" that can be used inside subtables.
+
+each tuple must contain 2 positive integers:
+
+* number of "even more nested child tables". Additional die is thrown to choose subtable,
+  and so this number is required to equal "size of a die"
+
+* number of faces/sides of a die that is used to choose row from target table
+
+"""
+
 class StatsTable(object):
 
     def __init__(
@@ -147,7 +198,7 @@ class StatsTable(object):
             max_point_buy_cost=27,
             max_probability_scale=120,
             num_stats=6,
-            table_dices=((1, 100), (1, 40), (1, 20), (1, 12), (1, 10), (1, 8), (1, 6), (1, 4), (1, 2), (1, 1)),
+            table_dices=DEFAULT_TABLE_DICES,
             pointbuy_table=None,):
         """Initialize stats table calculator.
 
@@ -346,7 +397,8 @@ class StatsTable(object):
     def get_fitting_variants_generator(self, prefered_table_sizes):
         fitting_candidate = list(prefered_table_sizes)
 
-        for i, prefered_table_size in enumerate(prefered_table_sizes):
+        for i in range(len(prefered_table_sizes)):
+            prefered_table_size = prefered_table_sizes[i]
             size_candidates = self.get_cadidate_sizes(prefered_table_size)
 
             if len(size_candidates) == 1:
@@ -361,6 +413,7 @@ class StatsTable(object):
                         # Next size must be tuned if current size differs from desired
                         delta = prefered_table_size - size_candidate
                         partial_sizes[0] += delta
+                        prefered_table_sizes[i+1] += delta
                         if partial_sizes[0] < 0:
                             partial_sizes[:] = [0] * len_partial_sizes
                             yield fitting_candidate[:i] + [size_candidate] + partial_sizes
@@ -376,7 +429,10 @@ class StatsTable(object):
         item_checks = []
 
         fit_coords = lengths_to_coords(fit_results)
-        prefered_coords = lengths_to_coords(prefered_results, normalize=True)
+        prefered_coords = lengths_to_coords(prefered_results, normalize=False)
+
+        target_sum = sum(prefered_results)
+        actual_sum = sum(fit_results)
 
         total_midpoint_offset = 0
         total_abs_midpoint_offset = 0
@@ -387,8 +443,8 @@ class StatsTable(object):
             fitted_start, fitted_end = fitted_segment
             prefered_start, prefered_end = prefered_segment
 
-            fitted_len = fitted_end - fitted_start
-            prefered_len = prefered_end - prefered_start
+            fitted_len = fit_results[processed-1]
+            prefered_len = prefered_results[processed-1]
 
             fitted_midpoint = (fitted_start + fitted_end) / 2
             prefered_midpoint = (prefered_start + prefered_end) / 2
@@ -406,9 +462,9 @@ class StatsTable(object):
                 fitted_start-rolling_avg_midpoint_offset, fitted_end-rolling_avg_midpoint_offset,
                 prefered_start, prefered_end
             )
-            if prefered_len == 0:
-                import pdb; pdb.set_trace()
 
+            if prefered_len == 0:
+                prefered_len = 0.000001
             item_checks.append({
                 'items': {
                     'fitted': {
@@ -424,7 +480,7 @@ class StatsTable(object):
                 },
                 'length_rel_error': abs(fitted_len - prefered_len) / prefered_len,
 
-                'midpoint_offset': midpoint_offset,
+                'midpoint_offset': abs_midpoint_offset,
                 'rolling_avg_midpoint_offset': rolling_avg_midpoint_offset,
 
                 'overlap_len': overlap_len,
@@ -445,7 +501,7 @@ class StatsTable(object):
 
             gracious_overlap_quality = max(datum['overlap_ratio'], datum['offseted_overlap_ratio'])
 
-            offset_quality = 1 - datum['midpoint_offset']
+            offset_quality = 1 - datum['midpoint_offset']/prefered_len
             len_quality = 1 - datum['length_rel_error']
 
             if fitted_len:
@@ -458,14 +514,25 @@ class StatsTable(object):
             else:
                 item_quality = 0
 
-            logger.debug('qualities of segment #{0}: offset={1}, len={2}, overlap={3}, len_norm_coeff={4}, total={5}'.format(i, offset_quality, len_quality, gracious_overlap_quality, len_norm_coeff, item_quality))
+            logger.debug('qualities of segment #{0} ({6}): offset={1}, len={2}, overlap={3}, len_norm_coeff={4}, total={5}'.format(i, offset_quality, len_quality, gracious_overlap_quality, len_norm_coeff, item_quality, fit_results[i]))
 
             quality += item_quality
 
         logger.debug('total quality of %s: %s', fit_results, quality)
+        if actual_sum >= target_sum:
+            missing_items_coeff = (actual_sum / target_sum)**4
+        else:
+            # extra items are less critical than missing
+            missing_items_coeff = (target_sum / actual_sum)**0.4
+
+        logger.debug('missing_items multiplier for quality: %s', missing_items_coeff)
+
+        quality *= missing_items_coeff
+
+        logger.debug('final quality: %s', quality)
         return quality
 
-    def get_strange_tables(self, prefered_table_sizes=None):
+    def get_strange_tables(self, prefered_table_sizes=None, base_roll='2d10k1'):
         """Return data for "strange" stat choosing tables.
 
         Up to 10 "tables" are generated.
@@ -474,13 +541,19 @@ class StatsTable(object):
 
         """
 
-        # 1. Roll to get number of table: (2d10 keep largest 1).
+        # 1. Roll to get number of table: (2d10 or 4d10 keep largest 1).
         table_number_rolls = range(1, 11)
+        if base_roll == '2d10k1':
+            probs_table = PRECALCED_2D10K1_PROBS
+        elif base_roll == '4d10k1':
+            probs_table = PRECALCED_4D10K1_PROBS
+        else:
+            raise ValueError("base roll %s not supported" % base_roll)
 
         # Now I perform something similar to projection that makes
         # ranges for 2 probabilities the same.
         # This is not mathematically correct but gives satisfying results
-        table_number_rolls_max_prob = PRECALCED_2D10K1_PROBS[10]
+        table_number_rolls_max_prob = probs_table[10]
 
         proj_coeff = self.max_prob / table_number_rolls_max_prob
         proj_coeff *= 1.01
@@ -488,7 +561,7 @@ class StatsTable(object):
         projected_table_number_rolls_probs = {}
 
         for table_number in table_number_rolls:
-            roll_prob = PRECALCED_2D10K1_PROBS[table_number]
+            roll_prob = probs_table[table_number]
             projected_prob = roll_prob * proj_coeff
             projected_table_number_rolls_probs[table_number] = projected_prob
 
@@ -497,10 +570,11 @@ class StatsTable(object):
             for stats_tuple in self.set_of_stat_tuples
         ]
 
-        stats_tuples_with_prob.sort(key=lambda x: x[1])
+        stats_tuples_with_prob.sort(key=lambda x: x[1], reverse=True)
+        logger.debug('max prob: %s', stats_tuples_with_prob[-1][1])
 
         table_number_rolls = list(table_number_rolls)
-        table_number_rolls.sort(key=lambda x: projected_table_number_rolls_probs[x])
+        table_number_rolls.sort(key=lambda x: projected_table_number_rolls_probs[x], reverse=True)
 
         if prefered_table_sizes is None:
             prefered_table_sizes = []
@@ -511,18 +585,25 @@ class StatsTable(object):
         # index of first table to be processed:
         tables_processing_start_index = len(prefered_table_sizes)
 
-        for table_number in table_number_rolls[tables_processing_start_index:]:
+        limited_table_number_rolls = table_number_rolls[tables_processing_start_index:]
+
+        for i, table_number in enumerate(limited_table_number_rolls):
+
             prefered_table_size = 0
+            current_table_projected_prob = projected_table_number_rolls_probs.get(table_number, 0)
 
-            current_table_projected_prob = projected_table_number_rolls_probs.get(table_number, 1)
-            next_table_projected_prob = projected_table_number_rolls_probs.get(table_number+1, 1)
+            try:
+                next_table_number = limited_table_number_rolls[i+1]
+                next_table_projected_prob = projected_table_number_rolls_probs.get(next_table_number, 0)
+            except IndexError:
+                next_table_projected_prob = 0
 
-            if next_table_projected_prob == 1:
-                limiting_prob = 1
+            if next_table_projected_prob == 0:
+                limiting_prob = next_table_projected_prob
             else:
                 limiting_prob = (current_table_projected_prob + next_table_projected_prob) / 2
 
-            while stats_tuples_with_prob[stats_processing_start_index][1] < limiting_prob:
+            while stats_tuples_with_prob[stats_processing_start_index][1] > limiting_prob:
                 prefered_table_size += 1
                 stats_processing_start_index += 1
 
@@ -538,11 +619,13 @@ class StatsTable(object):
 
         total_quality = 0
         best_quality = 0
+        best_fitting_sizes = None
         for fitted_sizes in self.get_fitting_variants_generator(prefered_table_sizes):
+            logger.debug('possible table sizes: %s', fitted_sizes)
             quality = self.get_fit_quality(fitted_sizes, prefered_table_sizes)
             total_quality += quality
             best_quality = max(quality, best_quality)
-            if quality == best_quality:
+            if quality == best_quality or best_fitting_sizes is None:
                 best_fitting_sizes = fitted_sizes
 
         logger.info("best fitting table sizes: %s", best_fitting_sizes)
@@ -551,7 +634,7 @@ class StatsTable(object):
         for i, size in enumerate(best_fitting_sizes):
             table_number = i + 1
             dice_to_stats_mapping = OrderedDict()
-            probability = PRECALCED_2D10K1_PROBS[table_number]
+            probability = probs_table[table_number]
             table_data[table_number] = {
                 'subrolls': get_dice_description(self.talbe_size_to_dices_mapping[size]),
                 'stats': dice_to_stats_mapping,
@@ -568,7 +651,10 @@ class StatsTable(object):
                     subkey = (j, )
                 dice_key = (table_number, ) + subkey
 
-                stats, prob = stats_tuples_with_prob.pop(0)
+                try:
+                    stats, prob = stats_tuples_with_prob.pop(0)
+                except IndexError:
+                    break
                 stats_as_string = ' '.join([str(x) for x in stats])
 
                 dice_to_stats_mapping[dice_key] = {
@@ -594,7 +680,7 @@ if __name__ == '__main__':
         max_probability_scale=1000,
     )
 
-    results2 = jsonize_tuple_keys(st.get_strange_tables())
+    results2 = jsonize_tuple_keys(st.get_strange_tables(base_roll='4d10k1'))
 
     # print(json.dumps(results2, indent=2))
 
